@@ -111,6 +111,53 @@ export function clampHeight(value: unknown): number | undefined {
   return Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(value)));
 }
 
+/** localStorage key for "open full pages full screen" on this browser. */
+export const AUTO_FULLSCREEN_KEY = "html-artifact:auto-fullscreen";
+
+/**
+ * Returns whether full pages should open full screen when a doc loads.
+ *
+ * @returns true when the viewer turned the preference on.
+ */
+export function getAutoFullscreen(): boolean {
+  try {
+    return window.localStorage.getItem(AUTO_FULLSCREEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Saves the "open full pages full screen" preference for this browser.
+ *
+ * @param on whether the preference is on.
+ */
+export function setAutoFullscreen(on: boolean) {
+  try {
+    if (on) {
+      window.localStorage.setItem(AUTO_FULLSCREEN_KEY, "1");
+    } else {
+      window.localStorage.removeItem(AUTO_FULLSCREEN_KEY);
+    }
+  } catch {
+    // Storage can be unavailable, for example in a private window.
+  }
+}
+
+/**
+ * Returns whether the current URL asks to open the doc's page full screen,
+ * for example /doc/my-page-abc123?app.
+ *
+ * @returns true when the URL has an "app" query parameter.
+ */
+export function urlWantsFullscreen(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).has("app");
+  } catch {
+    return false;
+  }
+}
+
 /** Frames created on this page. */
 const frames = new Set<ArtifactFrame>();
 
@@ -158,6 +205,12 @@ export class ArtifactFrame {
   private readonly warning: HTMLElement;
   private readonly editButton: HTMLButtonElement;
   private readonly fullscreenButton: HTMLButtonElement;
+  private readonly autoButton: HTMLButtonElement;
+  private readonly linkButton: HTMLButtonElement;
+  private page = false;
+  private overlay?: HTMLElement;
+  private savedHeight?: string;
+  private onKeyDown?: (event: KeyboardEvent) => void;
   private renderedHtml?: string;
   private pendingHtml?: string;
   private ready = false;
@@ -202,13 +255,33 @@ export class ArtifactFrame {
     this.fullscreenButton.className = "html-artifact-fullscreen";
     this.fullscreenButton.textContent = t("Full screen");
     this.fullscreenButton.addEventListener("click", () => {
-      this.toggleFullscreen();
+      this.setFullscreen(!this.isFullscreen);
+    });
+
+    // Shown only while a full page is full screen.
+    this.autoButton = document.createElement("button");
+    this.autoButton.type = "button";
+    this.autoButton.className = "html-artifact-auto";
+    this.autoButton.textContent = t("Always open full screen");
+    this.autoButton.addEventListener("click", () => {
+      setAutoFullscreen(!getAutoFullscreen());
+      this.syncButtons();
+    });
+
+    this.linkButton = document.createElement("button");
+    this.linkButton.type = "button";
+    this.linkButton.className = "html-artifact-link";
+    this.linkButton.textContent = t("Copy full-screen link");
+    this.linkButton.addEventListener("click", () => {
+      void this.copyLink();
     });
 
     this.caption.append(
       this.title,
       this.warning,
       this.editButton,
+      this.autoButton,
+      this.linkButton,
       this.fullscreenButton
     );
 
@@ -233,7 +306,9 @@ export class ArtifactFrame {
     this.title.textContent = meta.title ?? t("Live HTML");
     this.warning.hidden = !editable || !!(meta.title && meta.description);
     this.editButton.hidden = !editable;
+    this.page = page;
     this.element.classList.toggle("is-page", page);
+    this.syncButtons();
 
     // A frame's prefers-color-scheme follows the color-scheme of its element,
     // so artifacts follow Outline's theme rather than the operating system's.
@@ -268,7 +343,15 @@ export class ArtifactFrame {
 
     if (message.type === MessageType.Height) {
       const height = clampHeight(message.height);
-      if (height !== undefined) {
+      if (height === undefined) {
+        return;
+      }
+
+      // In full screen the frame fills the window; remember the height for
+      // when it returns to the doc.
+      if (this.overlay) {
+        this.savedHeight = `${height}px`;
+      } else {
         this.iframe.style.height = `${height}px`;
       }
     }
@@ -296,12 +379,124 @@ export class ArtifactFrame {
     this.pendingHtml = undefined;
   }
 
-  private toggleFullscreen() {
-    if (document.fullscreenElement === this.element) {
-      void document.exitFullscreen?.();
+  /** Whether the frame currently covers the whole window. */
+  get isFullscreen() {
+    return !!this.overlay;
+  }
+
+  /**
+   * Covers the whole window with the artifact, like a Claude artifact page.
+   * This is a fixed overlay on document.body rather than the Fullscreen API,
+   * which iPhone Safari only supports for video. The caption and iframe move
+   * into the overlay, so no editor ancestor can clip or offset it.
+   *
+   * @param on whether to cover the window.
+   */
+  setFullscreen(on: boolean) {
+    if (on === this.isFullscreen) {
       return;
     }
-    void this.element.requestFullscreen?.();
+
+    // Moving an iframe in the DOM reloads it, so resend the HTML once the
+    // renderer is ready again.
+    if (this.renderedHtml !== undefined) {
+      this.pendingHtml = this.renderedHtml;
+      this.renderedHtml = undefined;
+    }
+    this.ready = false;
+
+    if (on) {
+      const background = getComputedStyle(this.element).backgroundColor;
+      const overlay = document.createElement("div");
+      overlay.className = "html-artifact-overlay";
+      Object.assign(overlay.style, {
+        position: "fixed",
+        inset: "0",
+        zIndex: "3000",
+        display: "flex",
+        flexDirection: "column",
+        background:
+          background && background !== "rgba(0, 0, 0, 0)"
+            ? background
+            : "Canvas",
+      });
+      Object.assign(this.caption.style, {
+        position: "fixed",
+        top: "calc(8px + env(safe-area-inset-top, 0px))",
+        right: "calc(8px + env(safe-area-inset-right, 0px))",
+        zIndex: "3001",
+        display: "flex",
+        flexWrap: "wrap",
+        justifyContent: "flex-end",
+        gap: "6px",
+        maxWidth: "calc(100vw - 16px)",
+        padding: "4px",
+        borderRadius: "8px",
+        background: overlay.style.background,
+        boxShadow: "0 2px 12px rgba(0, 0, 0, 0.2)",
+        font: "13px system-ui, sans-serif",
+        opacity: "1",
+      });
+      this.title.hidden = true;
+      this.warning.hidden = true;
+      this.savedHeight = this.iframe.style.height;
+      Object.assign(this.iframe.style, { flex: "1", height: "100%" });
+      overlay.append(this.iframe, this.caption);
+      document.body.append(overlay);
+      this.overlay = overlay;
+    } else {
+      this.caption.removeAttribute("style");
+      this.title.hidden = false;
+      this.iframe.style.flex = "";
+      this.iframe.style.height = this.savedHeight ?? "150px";
+      this.element.append(this.caption, this.iframe);
+      this.overlay?.remove();
+      this.overlay = undefined;
+    }
+    // Stop the doc behind the overlay from scrolling.
+    document.documentElement.style.overflow = on ? "hidden" : "";
+    document.body.style.overflow = on ? "hidden" : "";
+
+    if (on) {
+      this.onKeyDown = (event) => {
+        if (event.key === "Escape") {
+          this.setFullscreen(false);
+        }
+      };
+      document.addEventListener("keydown", this.onKeyDown);
+    } else if (this.onKeyDown) {
+      document.removeEventListener("keydown", this.onKeyDown);
+      this.onKeyDown = undefined;
+    }
+    this.syncButtons();
+  }
+
+  private syncButtons() {
+    const on = this.isFullscreen;
+    this.fullscreenButton.textContent = on
+      ? t("Exit full screen")
+      : t("Full screen");
+    this.autoButton.hidden = !on || !this.page;
+    this.linkButton.hidden = !on || !this.page;
+    this.autoButton.setAttribute("aria-pressed", String(getAutoFullscreen()));
+  }
+
+  private async copyLink() {
+    const url = new URL(window.location.href);
+    url.searchParams.set("app", "");
+    const link = url
+      .toString()
+      .replace(/app=$/, "app")
+      .replace(/app=&/, "app&");
+    try {
+      await navigator.clipboard.writeText(link);
+      this.linkButton.textContent = t("Link copied");
+    } catch {
+      this.linkButton.textContent = link;
+    }
+    setTimeout(() => {
+      this.linkButton.textContent = t("Copy full-screen link");
+    }, 2000);
   }
 
   private editSource() {
@@ -335,8 +530,10 @@ function getNewState(
   doc: Node,
   previous: HtmlArtifactState,
   rendererUrl: string,
-  options: Omit<FrameOptions, "page">
+  options: Omit<FrameOptions, "page">,
+  autoOpen = false
 ): HtmlArtifactState {
+  let opened = false;
   const blocks = findArtifactBlocks(doc);
   const used = new Set<ArtifactFrame>();
   const decorations: Decoration[] = [];
@@ -353,10 +550,14 @@ function getNewState(
     const frame = existing ?? new ArtifactFrame(rendererUrl);
     used.add(frame);
     frame.pos = block.pos;
-    frame.update(block.node.textContent, {
-      ...options,
-      page: isHtmlPage(block.node),
-    });
+    const page = isHtmlPage(block.node);
+    frame.update(block.node.textContent, { ...options, page });
+
+    // Only the doc's first full page opens full screen, and only on load.
+    if (autoOpen && page && !opened) {
+      opened = true;
+      frame.setFullscreen(true);
+    }
 
     decorations.push(
       Decoration.widget(
@@ -423,7 +624,13 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
         if (!rendererUrl || typeof document === "undefined") {
           return empty;
         }
-        return getNewState(doc, empty, rendererUrl, options());
+        return getNewState(
+          doc,
+          empty,
+          rendererUrl,
+          options(),
+          urlWantsFullscreen() || getAutoFullscreen()
+        );
       },
       apply: (tr: Transaction, pluginState: HtmlArtifactState) => {
         if (!rendererUrl || typeof document === "undefined") {
@@ -443,6 +650,16 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
         );
       },
     },
+    view: () => ({
+      destroy() {
+        // Leaving the doc must not leave a full-screen overlay behind.
+        for (const frame of frames) {
+          if (frame.isFullscreen) {
+            frame.setFullscreen(false);
+          }
+        }
+      },
+    }),
     props: {
       decorations(state) {
         const pluginState = this.getState(state);

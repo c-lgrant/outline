@@ -10,8 +10,11 @@ import HtmlArtifact, {
   clampHeight,
   findArtifactBlocks,
   getArtifactMeta,
+  getAutoFullscreen,
   getRendererUrl,
   pluginKey,
+  setAutoFullscreen,
+  urlWantsFullscreen,
 } from "./HtmlArtifact";
 
 const RENDERER = "https://artifacts.example.com/render.html";
@@ -274,20 +277,86 @@ describe("HtmlArtifact", () => {
       expect(frame.iframe.style.colorScheme).toBe("dark");
       frame.update("<p>x</p>", { ...view, dark: false });
       expect(frame.iframe.style.colorScheme).toBe("light");
+    });
 
+    it("goes full screen as an overlay on the body and comes back", () => {
+      const frame = new ArtifactFrame(RENDERER);
+      document.body.append(frame.element);
+      frame.update("<p>x</p>", { ...view, page: true });
       const button = frame.element.querySelector(
         ".html-artifact-fullscreen"
       ) as HTMLButtonElement;
-      const request = vi.fn().mockResolvedValue(undefined);
-      frame.element.requestFullscreen = request;
+
       button.click();
-      expect(request).toHaveBeenCalled();
+      const overlay = document.querySelector(".html-artifact-overlay");
+      expect(frame.isFullscreen).toBe(true);
+      expect(overlay?.contains(frame.iframe)).toBe(true);
+      expect(document.body.style.overflow).toBe("hidden");
+
+      // Height reports are kept for later instead of shrinking the overlay.
+      frame.handleMessage({ type: MessageType.Height, height: 500 });
+      expect(frame.iframe.style.height).toBe("100%");
+
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      expect(frame.isFullscreen).toBe(false);
+      expect(document.querySelector(".html-artifact-overlay")).toBeNull();
+      expect(frame.element.contains(frame.iframe)).toBe(true);
+      expect(frame.iframe.style.height).toBe("500px");
+      expect(document.body.style.overflow).toBe("");
+      frame.element.remove();
+    });
+
+    it("remembers the auto full screen preference", () => {
+      setAutoFullscreen(true);
+      expect(getAutoFullscreen()).toBe(true);
+      setAutoFullscreen(false);
+      expect(getAutoFullscreen()).toBe(false);
     });
 
     it("allows tall full pages", () => {
       const frame = new ArtifactFrame(RENDERER);
       frame.handleMessage({ type: MessageType.Height, height: 9000 });
       expect(frame.iframe.style.height).toBe("9000px");
+    });
+  });
+
+  describe.runIf(typeof document !== "undefined")("auto full screen", () => {
+    afterEach(() => {
+      setAutoFullscreen(false);
+      window.history.replaceState(null, "", "/");
+      document
+        .querySelectorAll(".html-artifact-overlay")
+        .forEach((el) => el.remove());
+      document.body.style.overflow = "";
+      document.documentElement.style.overflow = "";
+    });
+
+    const firstFrame = (state: EditorState) =>
+      pluginKey.getState(state)!.decorationSet.find()[0].spec
+        .frame as ArtifactFrame;
+
+    it("opens the first full page when the link has ?app", () => {
+      window.history.replaceState(null, "", "/doc/test?app");
+      expect(urlWantsFullscreen()).toBe(true);
+      const state = stateFor(docWith(["html-page", "<b>page</b>"]));
+      expect(firstFrame(state).isFullscreen).toBe(true);
+    });
+
+    it("opens the first full page when the preference is on", () => {
+      setAutoFullscreen(true);
+      const state = stateFor(docWith(["html-page", "<b>page</b>"]));
+      expect(firstFrame(state).isFullscreen).toBe(true);
+    });
+
+    it("never opens widgets or opens without being asked", () => {
+      setAutoFullscreen(true);
+      expect(
+        firstFrame(stateFor(docWith(["html-live", "<b>w</b>"]))).isFullscreen
+      ).toBe(false);
+      setAutoFullscreen(false);
+      expect(
+        firstFrame(stateFor(docWith(["html-page", "<b>p</b>"]))).isFullscreen
+      ).toBe(false);
     });
   });
 });
