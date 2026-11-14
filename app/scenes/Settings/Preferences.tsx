@@ -91,6 +91,15 @@ function Preferences() {
     [user, t]
   );
 
+  const handleOpenPagesFullscreenChange = React.useCallback(
+    async (checked: boolean) => {
+      user.setPreference(UserPreference.OpenPagesFullscreen, checked);
+      await user.save();
+      toast.success(t("Preferences saved"));
+    },
+    [user, t]
+  );
+
   const handleSeamlessEditChange = React.useCallback(
     async (checked: boolean) => {
       user.setPreference(UserPreference.SeamlessEdit, !checked);
@@ -269,13 +278,27 @@ function Preferences() {
         description={t(
           "Display live word, character, and paragraph counts while editing."
         )}
-        border={false}
       >
         <Switch
           id={UserPreference.ShowDocumentStats}
           name={UserPreference.ShowDocumentStats}
           checked={user.getPreference(UserPreference.ShowDocumentStats)}
           onChange={handleShowDocumentStatsChange}
+        />
+      </SettingRow>
+      <SettingRow
+        name={UserPreference.OpenPagesFullscreen}
+        label={t("Open full pages full screen")}
+        description={t(
+          "When a document starts with an HTML page block, show the page across the whole window, like an app."
+        )}
+        border={false}
+      >
+        <Switch
+          id={UserPreference.OpenPagesFullscreen}
+          name={UserPreference.OpenPagesFullscreen}
+          checked={!!user.getPreference(UserPreference.OpenPagesFullscreen)}
+          onChange={handleOpenPagesFullscreenChange}
         />
       </SettingRow>
 

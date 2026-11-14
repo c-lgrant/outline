@@ -14,7 +14,6 @@ import HtmlArtifact, {
   clampHeight,
   findArtifactBlocks,
   getArtifactMeta,
-  getAutoFullscreen,
   getRendererUrl,
   isOwnFileUrl,
   MAX_DATA_CHARS,
@@ -22,8 +21,8 @@ import HtmlArtifact, {
   parseFiles,
   recordArtifactFile,
   pluginKey,
+  prefersFullscreen,
   saveArtifactData,
-  setAutoFullscreen,
   urlWantsFullscreen,
 } from "./HtmlArtifact";
 
@@ -326,11 +325,10 @@ describe("HtmlArtifact", () => {
       frame.element.remove();
     });
 
-    it("remembers the auto full screen preference", () => {
-      setAutoFullscreen(true);
-      expect(getAutoFullscreen()).toBe(true);
-      setAutoFullscreen(false);
-      expect(getAutoFullscreen()).toBe(false);
+    it("reads the full screen account preference", () => {
+      expect(prefersFullscreen({ openPagesFullscreen: true })).toBe(true);
+      expect(prefersFullscreen({ openPagesFullscreen: false })).toBe(false);
+      expect(prefersFullscreen(null)).toBe(false);
     });
 
     it("allows tall full pages", () => {
@@ -342,7 +340,6 @@ describe("HtmlArtifact", () => {
 
   describe.runIf(typeof document !== "undefined")("auto full screen", () => {
     afterEach(() => {
-      setAutoFullscreen(false);
       window.history.replaceState(null, "", "/");
       document
         .querySelectorAll(".html-artifact-overlay")
@@ -362,20 +359,37 @@ describe("HtmlArtifact", () => {
       expect(firstFrame(state).isFullscreen).toBe(true);
     });
 
-    it("opens the first full page when the preference is on", () => {
-      setAutoFullscreen(true);
-      const state = stateFor(docWith(["html-page", "<b>page</b>"]));
+    const withPrefs = (
+      doc: ReturnType<typeof docWith>,
+      userPreferences: Record<string, unknown> | null
+    ) =>
+      EditorState.create({
+        doc,
+        plugins: [
+          HtmlArtifact({
+            editor: { props: { readOnly: false, userPreferences } } as never,
+          }),
+        ],
+      });
+
+    it("opens the first full page when the account preference is on", () => {
+      const state = withPrefs(docWith(["html-page", "<b>page</b>"]), {
+        openPagesFullscreen: true,
+      });
       expect(firstFrame(state).isFullscreen).toBe(true);
     });
 
     it("never opens widgets or opens without being asked", () => {
-      setAutoFullscreen(true);
       expect(
-        firstFrame(stateFor(docWith(["html-live", "<b>w</b>"]))).isFullscreen
+        firstFrame(
+          withPrefs(docWith(["html-live", "<b>w</b>"]), {
+            openPagesFullscreen: true,
+          })
+        ).isFullscreen
       ).toBe(false);
-      setAutoFullscreen(false);
       expect(
-        firstFrame(stateFor(docWith(["html-page", "<b>p</b>"]))).isFullscreen
+        firstFrame(withPrefs(docWith(["html-page", "<b>p</b>"]), null))
+          .isFullscreen
       ).toBe(false);
     });
   });
