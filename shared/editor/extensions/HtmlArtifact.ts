@@ -5,6 +5,7 @@ import { Plugin, PluginKey, TextSelection } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import { Decoration, DecorationSet } from "prosemirror-view";
 import env from "../../env";
+import { UserPreference, type UserPreferences } from "../../types";
 import {
   HTML_DATA_LANGUAGE,
   HTML_FILES_LANGUAGE,
@@ -196,37 +197,21 @@ export function clampHeight(value: unknown): number | undefined {
   return Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(value)));
 }
 
-/** localStorage key for "open full pages full screen" on this browser. */
-export const AUTO_FULLSCREEN_KEY = "html-artifact:auto-fullscreen";
+/** Where a person changes the "open full pages full screen" preference. */
+export const PREFERENCES_PATH = "/settings/preferences";
 
 /**
- * Returns whether full pages should open full screen when a doc loads.
+ * Returns whether the signed-in person chose to open full pages full screen.
+ * It is an account preference (Settings, Preferences), so it follows them to
+ * every device.
  *
- * @returns true when the viewer turned the preference on.
+ * @param preferences the person's preferences, if signed in.
+ * @returns true when the preference is on.
  */
-export function getAutoFullscreen(): boolean {
-  try {
-    return window.localStorage.getItem(AUTO_FULLSCREEN_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Saves the "open full pages full screen" preference for this browser.
- *
- * @param on whether the preference is on.
- */
-export function setAutoFullscreen(on: boolean) {
-  try {
-    if (on) {
-      window.localStorage.setItem(AUTO_FULLSCREEN_KEY, "1");
-    } else {
-      window.localStorage.removeItem(AUTO_FULLSCREEN_KEY);
-    }
-  } catch {
-    // Storage can be unavailable, for example in a private window.
-  }
+export function prefersFullscreen(
+  preferences: UserPreferences | null | undefined
+): boolean {
+  return !!preferences?.[UserPreference.OpenPagesFullscreen];
 }
 
 /**
@@ -358,14 +343,15 @@ export class ArtifactFrame {
       this.setFullscreen(!this.isFullscreen);
     });
 
-    // Shown only while a full page is full screen.
+    // Shown only while a full page is full screen: opens the account
+    // preference that makes full pages open like this every time.
     this.autoButton = document.createElement("button");
     this.autoButton.type = "button";
     this.autoButton.className = "html-artifact-auto";
-    this.autoButton.textContent = t("Always open full screen");
+    this.autoButton.textContent = t("Full-screen setting");
     this.autoButton.addEventListener("click", () => {
-      setAutoFullscreen(!getAutoFullscreen());
-      this.syncButtons();
+      this.setFullscreen(false);
+      window.location.assign(PREFERENCES_PATH);
     });
 
     this.linkButton = document.createElement("button");
@@ -697,7 +683,6 @@ export class ArtifactFrame {
       : t("Full screen");
     this.autoButton.hidden = !on || !this.page;
     this.linkButton.hidden = !on || !this.page;
-    this.autoButton.setAttribute("aria-pressed", String(getAutoFullscreen()));
   }
 
   private async copyLink() {
@@ -1001,7 +986,8 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
           empty,
           rendererUrl,
           options(),
-          urlWantsFullscreen() || getAutoFullscreen(),
+          urlWantsFullscreen() ||
+            prefersFullscreen(editor.props.userPreferences),
           host
         );
       },
