@@ -38,6 +38,19 @@ export function isHtmlArtifact(node: Node) {
   );
 }
 
+/** The code block language that holds the saved data of the artifact above it. */
+export const HTML_DATA_LANGUAGE = "html-data";
+
+/**
+ * Returns true if the node is a code block holding an artifact's saved data.
+ *
+ * @param node The node to check.
+ * @returns true if the node is an html-data code block.
+ */
+export function isHtmlData(node: Node) {
+  return isCode(node) && node.attrs.language === HTML_DATA_LANGUAGE;
+}
+
 /**
  * Returns true if the node is a live HTML code block shown as a full page.
  *

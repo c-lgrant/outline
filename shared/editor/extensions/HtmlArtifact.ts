@@ -1,11 +1,16 @@
 import { t } from "i18next";
-import type { Node } from "prosemirror-model";
+import { Fragment, type Node } from "prosemirror-model";
 import type { EditorState, Transaction } from "prosemirror-state";
 import { Plugin, PluginKey, TextSelection } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import { Decoration, DecorationSet } from "prosemirror-view";
 import env from "../../env";
-import { isHtmlArtifact, isHtmlPage } from "../lib/isCode";
+import {
+  HTML_DATA_LANGUAGE,
+  isHtmlArtifact,
+  isHtmlData,
+  isHtmlPage,
+} from "../lib/isCode";
 import { findBlockNodes } from "../queries/findChildren";
 import { EditorStyleHelper } from "../styles/EditorStyleHelper";
 import type { NodeWithPos } from "../types";
@@ -18,7 +23,67 @@ export const MessageType = {
   Ready: "outline-artifact:ready",
   Render: "outline-artifact:render",
   Height: "outline-artifact:height",
+  /** Artifact to Outline: a storage call (save, upload, file). */
+  Rpc: "outline-artifact:rpc",
+  /** Outline to artifact: the answer to a storage call. */
+  RpcResult: "outline-artifact:rpc-result",
+  /** Outline to artifact: the saved data changed, for example on another device. */
+  Data: "outline-artifact:data",
 } as const;
+
+/** Largest saved data, in characters of JSON. */
+export const MAX_DATA_CHARS = 256 * 1024;
+
+/** Largest file an artifact may upload, in bytes. */
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+/** What a frame needs from the editor to store data and files. */
+export type StorageHost = {
+  /** Saves the artifact's data into the doc. Rejects with a readable reason. */
+  save: (frame: ArtifactFrame, data: unknown) => Promise<void>;
+  /** Uploads a file as an Outline attachment and returns its absolute URL. */
+  upload: (file: File) => Promise<string>;
+};
+
+/**
+ * Parses the text of an html-data block.
+ *
+ * @param text the block's text.
+ * @returns the data, or null when the block is empty or not valid JSON.
+ */
+export function parseData(text: string | undefined): unknown {
+  if (!text || !text.trim()) {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns true if the URL points at this Outline's own files, which are the
+ * only files an artifact may ask Outline to fetch for it.
+ *
+ * @param url the URL to check.
+ * @returns whether Outline may fetch it.
+ */
+export function isOwnFileUrl(url: unknown): url is string {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return (
+      parsed.origin === window.location.origin &&
+      (parsed.pathname.startsWith("/api/attachments.redirect") ||
+        parsed.pathname.startsWith("/api/files.get"))
+    );
+  } catch {
+    return false;
+  }
+}
 
 /** Sandbox flags for the renderer frame. Never includes allow-same-origin. */
 export const SANDBOX = "allow-scripts allow-forms allow-popups";
@@ -216,14 +281,20 @@ export class ArtifactFrame {
   private ready = false;
   private loads = 0;
   private timer?: ReturnType<typeof setTimeout>;
+  private readonly host?: StorageHost;
+  private editable = false;
+
+  /** The artifact's saved data, as the JSON text last read from the doc. */
+  private dataText = "";
 
   /** Stable key for the widget decoration that shows this frame. */
   readonly id = `html-artifact-${++nextId}`;
 
-  constructor(rendererUrl: string) {
+  constructor(rendererUrl: string, host?: StorageHost) {
     listen();
     frames.add(this);
     this.rendererUrl = rendererUrl;
+    this.host = host;
 
     this.element = document.createElement("div");
     this.element.classList.add(EditorStyleHelper.htmlArtifact);
@@ -306,6 +377,7 @@ export class ArtifactFrame {
     this.title.textContent = meta.title ?? t("Live HTML");
     this.warning.hidden = !editable || !!(meta.title && meta.description);
     this.editButton.hidden = !editable;
+    this.editable = editable;
     this.page = page;
     this.element.classList.toggle("is-page", page);
     this.syncButtons();
@@ -325,6 +397,24 @@ export class ArtifactFrame {
   }
 
   /**
+   * Gives the frame the text of its html-data block. When it changed, for
+   * example after a save on another device, the running artifact is told
+   * without being reloaded.
+   *
+   * @param text the JSON text of the data block, or "" when there is none.
+   */
+  setData(text: string) {
+    if (text === this.dataText) {
+      return;
+    }
+    this.dataText = text;
+    const win = this.iframe.contentWindow;
+    if (win && this.ready && this.pendingHtml === undefined) {
+      win.postMessage({ type: MessageType.Data, data: parseData(text) }, "*");
+    }
+  }
+
+  /**
    * Handles a message posted by this frame's renderer.
    *
    * @param data the message payload.
@@ -333,11 +423,22 @@ export class ArtifactFrame {
     if (!data || typeof data !== "object") {
       return;
     }
-    const message = data as { type?: unknown; height?: unknown };
+    const message = data as {
+      type?: unknown;
+      height?: unknown;
+      id?: unknown;
+      method?: unknown;
+      args?: unknown;
+    };
 
     if (message.type === MessageType.Ready) {
       this.ready = true;
       this.send();
+      return;
+    }
+
+    if (message.type === MessageType.Rpc) {
+      void this.handleRpc(message.id, message.method, message.args);
       return;
     }
 
@@ -374,9 +475,81 @@ export class ArtifactFrame {
     }
 
     // The renderer has an opaque origin, so "*" is the only target that works.
-    win.postMessage({ type: MessageType.Render, html: this.pendingHtml }, "*");
+    win.postMessage(
+      {
+        type: MessageType.Render,
+        html: this.pendingHtml,
+        data: parseData(this.dataText),
+        canEdit: this.editable && !!this.host,
+      },
+      "*"
+    );
     this.renderedHtml = this.pendingHtml;
     this.pendingHtml = undefined;
+  }
+
+  /**
+   * Runs one storage call from the artifact and posts the answer back.
+   * Only three calls exist: save its own data, upload a file, and fetch a
+   * file that lives in this Outline.
+   */
+  private async handleRpc(id: unknown, method: unknown, args: unknown) {
+    const win = this.iframe.contentWindow;
+    if (!win || (typeof id !== "number" && typeof id !== "string")) {
+      return;
+    }
+    const reply = (ok: boolean, payload: unknown) =>
+      win.postMessage(
+        ok
+          ? { type: MessageType.RpcResult, id, ok, result: payload }
+          : { type: MessageType.RpcResult, id, ok, error: String(payload) },
+        "*"
+      );
+    const [arg] = Array.isArray(args) ? args : [];
+
+    try {
+      if (method === "save") {
+        if (!this.host || !this.editable) {
+          throw new Error("This doc is read-only, so changes cannot be saved");
+        }
+        await this.host.save(this, arg);
+        reply(true, null);
+        return;
+      }
+
+      if (method === "upload") {
+        if (!this.host || !this.editable) {
+          throw new Error("This doc is read-only, so files cannot be uploaded");
+        }
+        if (!(arg instanceof File)) {
+          throw new Error("Pass a File to upload");
+        }
+        if (arg.size > MAX_UPLOAD_BYTES) {
+          throw new Error("Files must be 25 MB or smaller");
+        }
+        const url = await this.host.upload(arg);
+        reply(true, { url, name: arg.name, size: arg.size, type: arg.type });
+        return;
+      }
+
+      if (method === "file") {
+        if (!isOwnFileUrl(arg)) {
+          throw new Error("Only files uploaded to this Outline can be opened");
+        }
+        const response = await fetch(new URL(arg, window.location.origin), {
+          credentials: "same-origin",
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        reply(true, await response.blob());
+        return;
+      }
+
+      throw new Error(`Unknown storage call: ${String(method)}`);
+    } catch (error) {
+      reply(false, error instanceof Error ? error.message : error);
+    }
   }
 
   /** Whether the frame currently covers the whole window. */
@@ -526,15 +699,72 @@ export function findArtifactBlocks(doc: Node): NodeWithPos[] {
   return findBlockNodes(doc, true).filter((item) => isHtmlArtifact(item.node));
 }
 
+/**
+ * Saves an artifact's data into the html-data block right after it, creating
+ * the block if there is none. The change is an ordinary edit, so it syncs to
+ * other viewers, shows in the doc history and can be undone.
+ *
+ * @param view the editor view.
+ * @param pos the position of the artifact's code block.
+ * @param data the data to save; anything JSON can represent.
+ */
+export function saveArtifactData(view: EditorView, pos: number, data: unknown) {
+  if (!view.editable) {
+    throw new Error("This doc is read-only, so changes cannot be saved");
+  }
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(data ?? null, null, 2);
+  } catch {
+    json = undefined;
+  }
+  if (json === undefined) {
+    throw new Error("Only data that JSON can represent can be saved");
+  }
+  if (json.length > MAX_DATA_CHARS) {
+    throw new Error("Saved data must be 256 KB or smaller");
+  }
+
+  const { state } = view;
+  const inside = pos >= 0 && pos < state.doc.content.size;
+  const node = inside ? state.doc.nodeAt(pos) : null;
+  if (!node || !isHtmlArtifact(node)) {
+    throw new Error("The page was moved or removed, so it cannot save");
+  }
+  const after = pos + node.nodeSize;
+  const next = state.doc.nodeAt(after);
+  const content = state.schema.text(json);
+  const tr = state.tr;
+
+  if (next && isHtmlData(next)) {
+    if (next.textContent === json) {
+      return;
+    }
+    tr.replaceWith(
+      after + 1,
+      after + next.nodeSize - 1,
+      Fragment.from(content)
+    );
+  } else {
+    tr.insert(
+      after,
+      node.type.create({ ...node.attrs, language: HTML_DATA_LANGUAGE }, content)
+    );
+  }
+  view.dispatch(tr);
+}
+
 function getNewState(
   doc: Node,
   previous: HtmlArtifactState,
   rendererUrl: string,
   options: Omit<FrameOptions, "page">,
-  autoOpen = false
+  autoOpen = false,
+  host?: StorageHost
 ): HtmlArtifactState {
   let opened = false;
   const blocks = findArtifactBlocks(doc);
+  const dataBlocks: NodeWithPos[] = [];
   const used = new Set<ArtifactFrame>();
   const decorations: Decoration[] = [];
 
@@ -547,11 +777,20 @@ function getNewState(
       .map((decoration) => decoration.spec.frame as ArtifactFrame)
       .find((candidate) => !used.has(candidate));
 
-    const frame = existing ?? new ArtifactFrame(rendererUrl);
+    const frame = existing ?? new ArtifactFrame(rendererUrl, host);
     used.add(frame);
     frame.pos = block.pos;
     const page = isHtmlPage(block.node);
     frame.update(block.node.textContent, { ...options, page });
+
+    // The saved data, if any, is the html-data block right after the page.
+    const next = doc.nodeAt(end);
+    if (next && isHtmlData(next)) {
+      dataBlocks.push({ node: next, pos: end });
+      frame.setData(next.textContent);
+    } else {
+      frame.setData("");
+    }
 
     // Only the doc's first full page opens full screen, and only on load.
     if (autoOpen && page && !opened) {
@@ -572,7 +811,7 @@ function getNewState(
   }
 
   return {
-    blocks,
+    blocks: [...blocks, ...dataBlocks],
     decorationSet: DecorationSet.create(doc, decorations),
   };
 }
@@ -615,6 +854,22 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
     editable: !editor.props.readOnly,
     dark: !!editor.props.theme?.isDark,
   });
+  const host: StorageHost = {
+    save: async (frame, data) => {
+      if (!frame.view) {
+        throw new Error("The page is not ready yet, try again");
+      }
+      saveArtifactData(frame.view, frame.pos, data);
+    },
+    upload: async (file) => {
+      const upload = editor.props.uploadFile;
+      if (!upload) {
+        throw new Error("Uploads are not available here");
+      }
+      const url = await upload(file);
+      return new URL(url, window.location.origin).toString();
+    },
+  };
 
   return new Plugin<HtmlArtifactState>({
     key: pluginKey,
@@ -629,7 +884,8 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
           empty,
           rendererUrl,
           options(),
-          urlWantsFullscreen() || getAutoFullscreen()
+          urlWantsFullscreen() || getAutoFullscreen(),
+          host
         );
       },
       apply: (tr: Transaction, pluginState: HtmlArtifactState) => {
@@ -646,7 +902,9 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
             decorationSet: pluginState.decorationSet.map(tr.mapping, tr.doc),
           },
           rendererUrl,
-          options()
+          options(),
+          false,
+          host
         );
       },
     },
