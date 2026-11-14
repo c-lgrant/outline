@@ -8,6 +8,7 @@ import {
 import env from "../../env";
 import { EditorStyleHelper } from "../styles/EditorStyleHelper";
 import HtmlArtifact, {
+  ARTIFACT_DATA_META,
   ArtifactFrame,
   MessageType,
   SANDBOX,
@@ -222,8 +223,13 @@ describe("HtmlArtifact", () => {
   });
 
   describe.runIf(typeof document !== "undefined")("ArtifactFrame", () => {
-    const edit = { editable: true, page: false, dark: false };
-    const view = { editable: false, page: false, dark: false };
+    const edit = { editable: true, canSave: true, page: false, dark: false };
+    const view = {
+      editable: false,
+      canSave: false,
+      page: false,
+      dark: false,
+    };
 
     beforeEach(() => {
       vi.useFakeTimers();
@@ -372,6 +378,23 @@ describe("HtmlArtifact", () => {
         ],
       });
 
+    it("opens the page when it arrives after the editor starts empty", () => {
+      // Collaboration loads the doc after the editor is created.
+      const empty = withPrefs(docWith(["p", ""]), {
+        openPagesFullscreen: true,
+      });
+      expect(pluginKey.getState(empty)!.autoOpenPending).toBe(true);
+      const loaded = empty.apply(
+        empty.tr.replaceWith(
+          0,
+          empty.doc.content.size,
+          docWith(["html-page", "<b>page</b>"]).content
+        )
+      );
+      expect(firstFrame(loaded).isFullscreen).toBe(true);
+      expect(pluginKey.getState(loaded)!.autoOpenPending).toBe(false);
+    });
+
     it("opens the first full page when the account preference is on", () => {
       const state = withPrefs(docWith(["html-page", "<b>page</b>"]), {
         openPagesFullscreen: true,
@@ -465,11 +488,43 @@ describe("HtmlArtifact", () => {
       view.destroy();
     });
 
-    it("refuses to save in a read-only doc, too much data, or a moved page", () => {
-      const ro = viewFor(docWith(["html-live", "<b>x</b>"]), false);
-      expect(() => saveArtifactData(ro, 0, { a: 1 })).toThrow(/read-only/);
-      ro.destroy();
+    it("marks data writes so view mode can save them for doc editors", () => {
+      const view = viewFor(docWith(["p", "intro"], ["html-live", "<b>x</b>"]));
+      const dispatch = vi.spyOn(view, "dispatch");
+      saveArtifactData(view, view.state.doc.child(0).nodeSize, { n: 1 });
+      expect(dispatch.mock.calls[0][0].getMeta(ARTIFACT_DATA_META)).toBe(true);
+      view.destroy();
+    });
 
+    it("lets people who may edit the doc save while it is in view mode", () => {
+      const state = EditorState.create({
+        doc: docWith(["html-live", "<b>x</b>"]),
+        plugins: [
+          HtmlArtifact({
+            editor: { props: { readOnly: true, canUpdate: true } } as never,
+          }),
+        ],
+      });
+      const frame = pluginKey.getState(state)!.decorationSet.find()[0].spec
+        .frame as ArtifactFrame;
+      expect((frame as unknown as { canSave: boolean }).canSave).toBe(true);
+
+      const viewer = EditorState.create({
+        doc: docWith(["html-live", "<b>x</b>"]),
+        plugins: [
+          HtmlArtifact({
+            editor: { props: { readOnly: true, canUpdate: false } } as never,
+          }),
+        ],
+      });
+      const viewerFrame = pluginKey.getState(viewer)!.decorationSet.find()[0]
+        .spec.frame as ArtifactFrame;
+      expect((viewerFrame as unknown as { canSave: boolean }).canSave).toBe(
+        false
+      );
+    });
+
+    it("refuses to save in a read-only doc, too much data, or a moved page", () => {
       const view = viewFor(docWith(["html-live", "<b>x</b>"]));
       expect(() =>
         saveArtifactData(view, 0, "x".repeat(MAX_DATA_CHARS + 1))
@@ -523,7 +578,12 @@ describe("HtmlArtifact", () => {
         recordFile: vi.fn().mockResolvedValue(undefined),
       });
       document.body.append(frame.element);
-      frame.update("<p>x</p>", { editable: true, page: false, dark: false });
+      frame.update("<p>x</p>", {
+        editable: true,
+        canSave: true,
+        page: false,
+        dark: false,
+      });
       frame.setData('{"n":1}');
       vi.runAllTimers();
       vi.useRealTimers();
@@ -651,7 +711,12 @@ describe("HtmlArtifact", () => {
       expect(frame.iframe.src).toBe(src);
 
       // A read-only viewer cannot save.
-      frame.update("<p>x</p>", { editable: false, page: false, dark: false });
+      frame.update("<p>x</p>", {
+        editable: false,
+        canSave: false,
+        page: false,
+        dark: false,
+      });
       frame.handleMessage({
         type: MessageType.Rpc,
         id: 4,

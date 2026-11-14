@@ -34,6 +34,9 @@ export const MessageType = {
   Data: "outline-artifact:data",
 } as const;
 
+/** Transaction meta set on writes of page data and the uploaded-files list. */
+export const ARTIFACT_DATA_META = "htmlArtifactData";
+
 /** Largest saved data, in characters of JSON. */
 export const MAX_DATA_CHARS = 256 * 1024;
 
@@ -116,6 +119,12 @@ const MAX_HEIGHT = 20000;
 export type FrameOptions = {
   /** Whether the document can be edited. */
   editable: boolean;
+  /**
+   * Whether the person may save page data: true when editing, and also in
+   * view mode when they have permission to edit the doc (like ticking a
+   * checklist without entering edit mode).
+   */
+  canSave: boolean;
   /** Whether the block is a full page ("html-page") rather than a widget. */
   page: boolean;
   /** Whether the editor uses a dark theme. */
@@ -125,9 +134,19 @@ export type FrameOptions = {
 /** Delay before an edited source is re-rendered, in milliseconds. */
 const RENDER_DEBOUNCE = 500;
 
+/** How long after a doc opens its first full page may still open full screen. */
+export const AUTO_OPEN_WINDOW_MS = 15000;
+
 export type HtmlArtifactState = {
   decorationSet: DecorationSet;
   blocks: NodeWithPos[];
+  /**
+   * Whether the doc's first full page should still open full screen. The
+   * editor starts empty and receives the doc from the collaboration server
+   * afterwards, so this waits for the page to arrive instead of only looking
+   * at the first state. It is cleared once a page opens or the person edits.
+   */
+  autoOpenPending?: boolean;
 };
 
 export type ArtifactMeta = {
@@ -287,7 +306,7 @@ export class ArtifactFrame {
   private loads = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private readonly host?: StorageHost;
-  private editable = false;
+  private canSave = false;
 
   /** The artifact's saved data, as the JSON text last read from the doc. */
   private dataText = "";
@@ -387,12 +406,12 @@ export class ArtifactFrame {
    * @param html the artifact source.
    * @param options how the frame is shown.
    */
-  update(html: string, { editable, page, dark }: FrameOptions) {
+  update(html: string, { editable, canSave, page, dark }: FrameOptions) {
     const meta = getArtifactMeta(html);
     this.title.textContent = meta.title ?? t("Live HTML");
     this.warning.hidden = !editable || !!(meta.title && meta.description);
     this.editButton.hidden = !editable;
-    this.editable = editable;
+    this.canSave = canSave;
     this.page = page;
     this.element.classList.toggle("is-page", page);
     this.syncButtons();
@@ -495,7 +514,7 @@ export class ArtifactFrame {
         type: MessageType.Render,
         html: this.pendingHtml,
         data: parseData(this.dataText),
-        canEdit: this.editable && !!this.host,
+        canEdit: this.canSave && !!this.host,
       },
       "*"
     );
@@ -524,7 +543,7 @@ export class ArtifactFrame {
 
     try {
       if (method === "save") {
-        if (!this.host || !this.editable) {
+        if (!this.host || !this.canSave) {
           throw new Error("This doc is read-only, so changes cannot be saved");
         }
         await this.host.save(this, arg);
@@ -533,7 +552,7 @@ export class ArtifactFrame {
       }
 
       if (method === "upload") {
-        if (!this.host || !this.editable) {
+        if (!this.host || !this.canSave) {
           throw new Error("This doc is read-only, so files cannot be uploaded");
         }
         if (!(arg instanceof File)) {
@@ -740,9 +759,6 @@ export function findArtifactBlocks(doc: Node): NodeWithPos[] {
  * @param data the data to save; anything JSON can represent.
  */
 export function saveArtifactData(view: EditorView, pos: number, data: unknown) {
-  if (!view.editable) {
-    throw new Error("This doc is read-only, so changes cannot be saved");
-  }
   let json: string | undefined;
   try {
     json = JSON.stringify(data ?? null, null, 2);
@@ -845,7 +861,9 @@ function writeCompanion(
     const language = kind === "data" ? HTML_DATA_LANGUAGE : HTML_FILES_LANGUAGE;
     tr.insert(insertAt, node.type.create({ ...node.attrs, language }, content));
   }
-  view.dispatch(tr);
+  // Marked so the editor saves it even in view mode for people who may
+  // edit the doc (see app/editor, like checklist ticks).
+  view.dispatch(tr.setMeta(ARTIFACT_DATA_META, true));
 }
 
 function getNewState(
@@ -909,6 +927,7 @@ function getNewState(
   return {
     blocks: [...blocks, ...dataBlocks],
     decorationSet: DecorationSet.create(doc, decorations),
+    autoOpenPending: autoOpen && !opened,
   };
 }
 
@@ -946,8 +965,10 @@ function sourceDecorations(
  */
 export default function HtmlArtifact({ editor }: { editor: Editor }) {
   const rendererUrl = getRendererUrl();
+  const createdAt = Date.now();
   const options = () => ({
     editable: !editor.props.readOnly,
+    canSave: !editor.props.readOnly || !!editor.props.canUpdate,
     dark: !!editor.props.theme?.isDark,
   });
   const host: StorageHost = {
@@ -998,6 +1019,14 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
         if (!tr.docChanged) {
           return pluginState;
         }
+
+        // Keep waiting for the page while the doc is still arriving from the
+        // collaboration server, for a few seconds after the doc opens. Later
+        // on, a new page block is someone's edit, not a doc being opened.
+        const autoOpen =
+          !!pluginState.autoOpenPending &&
+          Date.now() - createdAt < AUTO_OPEN_WINDOW_MS &&
+          !tr.getMeta("uiEvent");
         return getNewState(
           tr.doc,
           {
@@ -1006,7 +1035,7 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
           },
           rendererUrl,
           options(),
-          false,
+          autoOpen,
           host
         );
       },
