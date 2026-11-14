@@ -2166,6 +2166,53 @@ mark {
     width: 100%;
     border: 0;
   }
+
+  // Full page artifacts: no frame chrome, at least a screen tall, with the
+  // caption shown as a small toolbar on hover.
+  &.is-page {
+    position: relative;
+    border: 0;
+    border-radius: 0;
+    margin: 0;
+    background: transparent;
+
+    .html-artifact-caption {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 1;
+      border: 1px solid ${props.theme.divider};
+      border-radius: 6px;
+      background: ${props.theme.background};
+      opacity: 0;
+      transition: opacity 100ms ease-in-out;
+    }
+
+    .html-artifact-title {
+      display: none;
+    }
+
+    &:hover .html-artifact-caption,
+    .html-artifact-caption:focus-within {
+      opacity: 1;
+    }
+
+    iframe {
+      min-height: calc(100vh - 160px);
+    }
+  }
+
+  &:fullscreen {
+    display: flex;
+    flex-direction: column;
+    background: ${props.theme.background};
+
+    iframe {
+      flex: 1;
+      height: auto !important;
+      min-height: 0;
+    }
+  }
 }
 
 .ProseMirror.exported {

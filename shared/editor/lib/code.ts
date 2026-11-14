@@ -133,6 +133,11 @@ export const codeLanguages: Record<string, CodeLanguage> = {
     label: "HTML (live)",
     loader: () => import("refractor/markup").then((m) => m.default),
   },
+  "html-page": {
+    lang: "markup",
+    label: "HTML (page)",
+    loader: () => import("refractor/markup").then((m) => m.default),
+  },
   ini: {
     lang: "ini",
     label: "INI",

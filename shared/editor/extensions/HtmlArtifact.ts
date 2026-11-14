@@ -5,7 +5,7 @@ import { Plugin, PluginKey, TextSelection } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import { Decoration, DecorationSet } from "prosemirror-view";
 import env from "../../env";
-import { isHtmlArtifact } from "../lib/isCode";
+import { isHtmlArtifact, isHtmlPage } from "../lib/isCode";
 import { findBlockNodes } from "../queries/findChildren";
 import { EditorStyleHelper } from "../styles/EditorStyleHelper";
 import type { NodeWithPos } from "../types";
@@ -25,7 +25,16 @@ export const SANDBOX = "allow-scripts allow-forms allow-popups";
 
 /** Smallest and largest height, in pixels, a frame may report. */
 const MIN_HEIGHT = 40;
-const MAX_HEIGHT = 4000;
+const MAX_HEIGHT = 20000;
+
+export type FrameOptions = {
+  /** Whether the document can be edited. */
+  editable: boolean;
+  /** Whether the block is a full page ("html-page") rather than a widget. */
+  page: boolean;
+  /** Whether the editor uses a dark theme. */
+  dark: boolean;
+};
 
 /** Delay before an edited source is re-rendered, in milliseconds. */
 const RENDER_DEBOUNCE = 500;
@@ -148,6 +157,7 @@ export class ArtifactFrame {
   private readonly title: HTMLElement;
   private readonly warning: HTMLElement;
   private readonly editButton: HTMLButtonElement;
+  private readonly fullscreenButton: HTMLButtonElement;
   private renderedHtml?: string;
   private pendingHtml?: string;
   private ready = false;
@@ -187,7 +197,20 @@ export class ArtifactFrame {
       this.editSource();
     });
 
-    this.caption.append(this.title, this.warning, this.editButton);
+    this.fullscreenButton = document.createElement("button");
+    this.fullscreenButton.type = "button";
+    this.fullscreenButton.className = "html-artifact-fullscreen";
+    this.fullscreenButton.textContent = t("Full screen");
+    this.fullscreenButton.addEventListener("click", () => {
+      this.toggleFullscreen();
+    });
+
+    this.caption.append(
+      this.title,
+      this.warning,
+      this.editButton,
+      this.fullscreenButton
+    );
 
     this.iframe = document.createElement("iframe");
     this.iframe.setAttribute("sandbox", SANDBOX);
@@ -203,13 +226,18 @@ export class ArtifactFrame {
    * Shows the given HTML, reloading the renderer if it changed.
    *
    * @param html the artifact source.
-   * @param editable whether the document can be edited.
+   * @param options how the frame is shown.
    */
-  update(html: string, editable: boolean) {
+  update(html: string, { editable, page, dark }: FrameOptions) {
     const meta = getArtifactMeta(html);
     this.title.textContent = meta.title ?? t("Live HTML");
     this.warning.hidden = !editable || !!(meta.title && meta.description);
     this.editButton.hidden = !editable;
+    this.element.classList.toggle("is-page", page);
+
+    // A frame's prefers-color-scheme follows the color-scheme of its element,
+    // so artifacts follow Outline's theme rather than the operating system's.
+    this.iframe.style.colorScheme = dark ? "dark" : "light";
 
     if (html === this.renderedHtml || html === this.pendingHtml) {
       return;
@@ -268,6 +296,14 @@ export class ArtifactFrame {
     this.pendingHtml = undefined;
   }
 
+  private toggleFullscreen() {
+    if (document.fullscreenElement === this.element) {
+      void document.exitFullscreen?.();
+      return;
+    }
+    void this.element.requestFullscreen?.();
+  }
+
   private editSource() {
     const view = this.view;
     if (!view || !view.editable) {
@@ -299,7 +335,7 @@ function getNewState(
   doc: Node,
   previous: HtmlArtifactState,
   rendererUrl: string,
-  editable: boolean
+  options: Omit<FrameOptions, "page">
 ): HtmlArtifactState {
   const blocks = findArtifactBlocks(doc);
   const used = new Set<ArtifactFrame>();
@@ -317,7 +353,10 @@ function getNewState(
     const frame = existing ?? new ArtifactFrame(rendererUrl);
     used.add(frame);
     frame.pos = block.pos;
-    frame.update(block.node.textContent, editable);
+    frame.update(block.node.textContent, {
+      ...options,
+      page: isHtmlPage(block.node),
+    });
 
     decorations.push(
       Decoration.widget(
@@ -363,13 +402,18 @@ function sourceDecorations(
 
 /**
  * Renders code blocks with the "html-live" language as sandboxed, live HTML,
- * in the same way that Mermaid code blocks render as diagrams. The source
- * stays in the document as an ordinary code block, so it survives the
- * markdown API and stays readable by search.
+ * in the same way that Mermaid code blocks render as diagrams. "html-page"
+ * blocks render the same way but as a full page: no border or caption bar,
+ * at least as tall as the screen. The source stays in the document as an
+ * ordinary code block, so it survives the markdown API and stays readable by
+ * search.
  */
 export default function HtmlArtifact({ editor }: { editor: Editor }) {
   const rendererUrl = getRendererUrl();
-  const editable = () => !editor.props.readOnly;
+  const options = () => ({
+    editable: !editor.props.readOnly,
+    dark: !!editor.props.theme?.isDark,
+  });
 
   return new Plugin<HtmlArtifactState>({
     key: pluginKey,
@@ -379,7 +423,7 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
         if (!rendererUrl || typeof document === "undefined") {
           return empty;
         }
-        return getNewState(doc, empty, rendererUrl, editable());
+        return getNewState(doc, empty, rendererUrl, options());
       },
       apply: (tr: Transaction, pluginState: HtmlArtifactState) => {
         if (!rendererUrl || typeof document === "undefined") {
@@ -395,7 +439,7 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
             decorationSet: pluginState.decorationSet.map(tr.mapping, tr.doc),
           },
           rendererUrl,
-          editable()
+          options()
         );
       },
     },
