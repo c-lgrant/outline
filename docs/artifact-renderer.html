@@ -38,7 +38,10 @@
           .split(/\s+/)
           .filter(Boolean);
 
+        // Lets the page follow the theme Outline sets on the frame. Zero
+        // specificity, so a page that sets its own color-scheme wins.
         var reporter =
+          "<style>:where(:root) { color-scheme: light dark; }</style>" +
           "<script>(function () {" +
           "var last = 0;" +
           "function send() {" +
