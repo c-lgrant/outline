@@ -98,8 +98,14 @@
             canEdit: !!canEdit,
             load: function () { return Promise.resolve(clone(data)); },
             save: function (value) {
-              var copy = clone(value);
-              return call("save", copy).then(function () { data = copy; });
+              // Set it first, so Outline's echo of this save is not reported
+              // to onChange as a change from elsewhere.
+              var copy = clone(value), before = data;
+              data = copy;
+              return call("save", copy).catch(function (error) {
+                if (data === copy) { data = before; }
+                throw error;
+              });
             },
             onChange: function (fn) {
               listeners.push(fn);
