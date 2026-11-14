@@ -106,7 +106,7 @@ describe("HtmlArtifact", () => {
     it("clamps to the allowed range", () => {
       expect(clampHeight(10)).toBe(40);
       expect(clampHeight(321.2)).toBe(322);
-      expect(clampHeight(99999)).toBe(4000);
+      expect(clampHeight(99999)).toBe(20000);
     });
 
     it("ignores non-numbers", () => {
@@ -116,12 +116,12 @@ describe("HtmlArtifact", () => {
   });
 
   describe("findArtifactBlocks", () => {
-    it("finds only html-live code blocks", () => {
+    it("finds only html-live and html-page code blocks", () => {
       const doc = docWith(
         ["p", "intro"],
         ["html-live", "<b>one</b>"],
         ["markup", "<b>not live</b>"],
-        ["html-live", "<b>two</b>"]
+        ["html-page", "<b>two</b>"]
       );
       expect(findArtifactBlocks(doc).map((b) => b.node.textContent)).toEqual([
         "<b>one</b>",
@@ -143,6 +143,19 @@ describe("HtmlArtifact", () => {
       expect(frame.iframe.getAttribute("sandbox")).toBe(SANDBOX);
       expect(SANDBOX).not.toContain("allow-same-origin");
       expect(widgets[0].from).toBe(state.doc.child(0).nodeSize);
+    });
+
+    it("marks html-page blocks as full pages", () => {
+      const state = stateFor(
+        docWith(["html-live", "<b>widget</b>"], ["html-page", "<b>page</b>"])
+      );
+      const frames = pluginKey
+        .getState(state)!
+        .decorationSet.find()
+        .map((d) => d.spec.frame as ArtifactFrame);
+      expect(
+        frames.map((f) => f.element.classList.contains("is-page"))
+      ).toEqual([false, true]);
     });
 
     it("draws nothing without a renderer URL", () => {
@@ -192,6 +205,9 @@ describe("HtmlArtifact", () => {
   });
 
   describe.runIf(typeof document !== "undefined")("ArtifactFrame", () => {
+    const edit = { editable: true, page: false, dark: false };
+    const view = { editable: false, page: false, dark: false };
+
     beforeEach(() => {
       vi.useFakeTimers();
     });
@@ -204,7 +220,7 @@ describe("HtmlArtifact", () => {
       const frame = new ArtifactFrame(RENDERER);
       document.body.append(frame.element);
 
-      frame.update("<p>hello</p>", true);
+      frame.update("<p>hello</p>", edit);
       vi.runAllTimers();
       expect(frame.iframe.src).toContain("artifacts.example.com/render.html");
 
@@ -224,11 +240,11 @@ describe("HtmlArtifact", () => {
 
     it("does not reload for unchanged HTML", () => {
       const frame = new ArtifactFrame(RENDERER);
-      frame.update("<p>same</p>", true);
+      frame.update("<p>same</p>", edit);
       vi.runAllTimers();
       const src = frame.iframe.src;
       frame.handleMessage({ type: MessageType.Ready });
-      frame.update("<p>same</p>", true);
+      frame.update("<p>same</p>", edit);
       vi.runAllTimers();
       expect(frame.iframe.src).toBe(src);
     });
@@ -239,17 +255,39 @@ describe("HtmlArtifact", () => {
         ".html-artifact-warning"
       ) as HTMLElement;
 
-      frame.update("<p>no meta</p>", true);
+      frame.update("<p>no meta</p>", edit);
       expect(warning.hidden).toBe(false);
 
-      frame.update("<p>no meta</p>", false);
+      frame.update("<p>no meta</p>", view);
       expect(warning.hidden).toBe(true);
 
       frame.update(
         '<title>T</title><meta name="description" content="D">',
-        true
+        edit
       );
       expect(warning.hidden).toBe(true);
+    });
+
+    it("follows the editor theme and offers full screen", () => {
+      const frame = new ArtifactFrame(RENDERER);
+      frame.update("<p>x</p>", { ...view, dark: true });
+      expect(frame.iframe.style.colorScheme).toBe("dark");
+      frame.update("<p>x</p>", { ...view, dark: false });
+      expect(frame.iframe.style.colorScheme).toBe("light");
+
+      const button = frame.element.querySelector(
+        ".html-artifact-fullscreen"
+      ) as HTMLButtonElement;
+      const request = vi.fn().mockResolvedValue(undefined);
+      frame.element.requestFullscreen = request;
+      button.click();
+      expect(request).toHaveBeenCalled();
+    });
+
+    it("allows tall full pages", () => {
+      const frame = new ArtifactFrame(RENDERER);
+      frame.handleMessage({ type: MessageType.Height, height: 9000 });
+      expect(frame.iframe.style.height).toBe("9000px");
     });
   });
 });
