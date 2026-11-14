@@ -19,6 +19,8 @@ import HtmlArtifact, {
   isOwnFileUrl,
   MAX_DATA_CHARS,
   parseData,
+  parseFiles,
+  recordArtifactFile,
   pluginKey,
   saveArtifactData,
   setAutoFullscreen,
@@ -428,6 +430,27 @@ describe("HtmlArtifact", () => {
       view.destroy();
     });
 
+    it("records uploads in an html-files block after the data, never from save()", () => {
+      const view = viewFor(
+        docWith(["p", "intro"], ["html-page", "<b>list</b>"], ["p", "end"])
+      );
+      const pos = view.state.doc.child(0).nodeSize;
+      const url = `${window.location.origin}/api/attachments.redirect?id=1`;
+
+      recordArtifactFile(view, pos, url);
+      expect(view.state.doc.child(2).attrs.language).toBe("html-files");
+      saveArtifactData(view, pos, { items: [] });
+      expect(view.state.doc.child(2).attrs.language).toBe("html-data");
+      expect(view.state.doc.child(3).attrs.language).toBe("html-files");
+      recordArtifactFile(view, pos, url);
+      expect(parseFiles(view.state.doc.child(3).textContent)).toEqual([url]);
+
+      const frame = pluginKey.getState(view.state)!.decorationSet.find()[0].spec
+        .frame as ArtifactFrame;
+      expect(frame.recordedFiles).toEqual([url]);
+      view.destroy();
+    });
+
     it("refuses to save in a read-only doc, too much data, or a moved page", () => {
       const ro = viewFor(docWith(["html-live", "<b>x</b>"]), false);
       expect(() => saveArtifactData(ro, 0, { a: 1 })).toThrow(/read-only/);
@@ -480,7 +503,11 @@ describe("HtmlArtifact", () => {
         .mockResolvedValue(
           "https://outline.example.com/api/attachments.redirect?id=9"
         );
-      const frame = new ArtifactFrame(RENDERER, { save, upload });
+      const frame = new ArtifactFrame(RENDERER, {
+        save,
+        upload,
+        recordFile: vi.fn().mockResolvedValue(undefined),
+      });
       document.body.append(frame.element);
       frame.update("<p>x</p>", { editable: true, page: false, dark: false });
       frame.setData('{"n":1}');
@@ -570,7 +597,22 @@ describe("HtmlArtifact", () => {
         )
       );
       expect(fetchSpy).not.toHaveBeenCalled();
+      // Listing the URL in its own saved data is not enough.
       frame.setData(JSON.stringify({ files: [{ url: own }] }, null, 2));
+      frame.handleMessage({
+        type: MessageType.Rpc,
+        id: 55,
+        method: "file",
+        args: [own],
+      });
+      await vi.waitFor(() =>
+        expect(post).toHaveBeenLastCalledWith(
+          expect.objectContaining({ id: 55, ok: false }),
+          "*"
+        )
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+      frame.recordedFiles = [own];
       frame.handleMessage({
         type: MessageType.Rpc,
         id: 6,
