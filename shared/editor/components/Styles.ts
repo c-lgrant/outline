@@ -2050,6 +2050,78 @@ mark {
     }
 }
 
+.${EditorStyleHelper.codeBlock}.${EditorStyleHelper.htmlArtifactSourceHidden} {
+  // Hide code without display none so toolbar can still be positioned against it
+  height: 0;
+  margin: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.${EditorStyleHelper.htmlArtifact} {
+  margin: 0.5em 0;
+  border: 1px solid ${props.theme.divider};
+  border-radius: 6px;
+  overflow: hidden;
+  background: ${props.theme.background};
+
+  .html-artifact-caption {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    font-size: 13px;
+    color: ${props.theme.textSecondary};
+    border-bottom: 1px solid ${props.theme.divider};
+  }
+
+  .html-artifact-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .html-artifact-warning {
+    color: ${props.theme.warning};
+  }
+
+  .html-artifact-edit {
+    border: 0;
+    background: none;
+    color: ${props.theme.textSecondary};
+    cursor: var(--pointer);
+    font: inherit;
+    padding: 2px 4px;
+
+    &:hover {
+      color: ${props.theme.text};
+    }
+  }
+
+  [hidden] {
+    display: none;
+  }
+
+  iframe {
+    display: block;
+    width: 100%;
+    border: 0;
+  }
+}
+
+.ProseMirror.exported {
+  .${EditorStyleHelper.codeBlock}.${EditorStyleHelper.htmlArtifactSourceHidden} {
+    height: auto;
+    overflow: visible;
+  }
+
+  .${EditorStyleHelper.htmlArtifact} {
+    display: none;
+  }
+}
+
 .${EditorStyleHelper.codeBlock}.with-line-wrap {
   pre {
     white-space: pre-wrap;

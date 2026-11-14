@@ -216,6 +216,12 @@ export class EditorStyleHelper {
   /** Container for a rendered Mermaid diagram */
   static readonly mermaidDiagram = "mermaid-diagram-wrapper";
 
+  /** Container for a rendered live HTML artifact */
+  static readonly htmlArtifact = "html-artifact-wrapper";
+
+  /** Applied to a live HTML code block while its source is hidden */
+  static readonly htmlArtifactSourceHidden = "html-artifact-source-hidden";
+
   // Global
 
   /** Minimum padding around editor */

@@ -16,3 +16,17 @@ export function isMermaid(node: Node) {
     (node.attrs.language === "mermaid" || node.attrs.language === "mermaidjs")
   );
 }
+
+/** The code block language that renders its HTML source as a live artifact. */
+export const HTML_ARTIFACT_LANGUAGE = "html-live";
+
+/**
+ * Returns true if the node is a code block whose HTML source should be
+ * rendered as a live, sandboxed artifact.
+ *
+ * @param node The node to check.
+ * @returns true if the node is a live HTML code block.
+ */
+export function isHtmlArtifact(node: Node) {
+  return isCode(node) && node.attrs.language === HTML_ARTIFACT_LANGUAGE;
+}

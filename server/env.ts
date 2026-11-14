@@ -268,6 +268,23 @@ export class Environment {
   );
 
   /**
+   * The URL of a page, on a different origin to URL, that renders the HTML of
+   * "html-live" code blocks. The page receives the HTML by postMessage and must
+   * refuse to render unless it is sandboxed. When unset, live HTML code blocks
+   * are shown as ordinary code.
+   */
+  @Public
+  @IsOptional()
+  @IsUrl({
+    protocols: ["https", "http"],
+    require_protocol: true,
+    require_tld: false,
+  })
+  public HTML_ARTIFACT_RENDERER_URL = this.toOptionalString(
+    environment.HTML_ARTIFACT_RENDERER_URL
+  );
+
+  /**
    * The fully qualified, external facing domain name of the collaboration
    * service, if different (unlikely)
    */
