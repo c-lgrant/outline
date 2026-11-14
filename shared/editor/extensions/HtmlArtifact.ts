@@ -37,6 +37,9 @@ export const MAX_DATA_CHARS = 256 * 1024;
 /** Largest file an artifact may upload, in bytes. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
+/** Most files one artifact may upload each time its doc is opened. */
+export const MAX_UPLOADS_PER_LOAD = 20;
+
 /** What a frame needs from the editor to store data and files. */
 export type StorageHost = {
   /** Saves the artifact's data into the doc. Rejects with a readable reason. */
@@ -287,6 +290,9 @@ export class ArtifactFrame {
   /** The artifact's saved data, as the JSON text last read from the doc. */
   private dataText = "";
 
+  /** Attachment URLs this frame uploaded since the doc was opened. */
+  private readonly uploaded = new Set<string>();
+
   /** Stable key for the widget decoration that shows this frame. */
   readonly id = `html-artifact-${++nextId}`;
 
@@ -527,14 +533,29 @@ export class ArtifactFrame {
         if (arg.size > MAX_UPLOAD_BYTES) {
           throw new Error("Files must be 25 MB or smaller");
         }
+        if (this.uploaded.size >= MAX_UPLOADS_PER_LOAD) {
+          throw new Error(
+            `A page can upload at most ${MAX_UPLOADS_PER_LOAD} files each time the doc is opened`
+          );
+        }
         const url = await this.host.upload(arg);
+        this.uploaded.add(url);
         reply(true, { url, name: arg.name, size: arg.size, type: arg.type });
         return;
       }
 
       if (method === "file") {
-        if (!isOwnFileUrl(arg)) {
-          throw new Error("Only files uploaded to this Outline can be opened");
+        // A page may only open its own files: ones it uploaded in this
+        // session or ones listed in its saved data. It cannot use the
+        // viewer's login to read any other attachment.
+        if (
+          !isOwnFileUrl(arg) ||
+          (!this.uploaded.has(arg) &&
+            !this.dataText.includes(JSON.stringify(arg)))
+        ) {
+          throw new Error(
+            "A page can only open files it uploaded or lists in its saved data"
+          );
         }
         const response = await fetch(new URL(arg, window.location.origin), {
           credentials: "same-origin",

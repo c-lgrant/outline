@@ -548,6 +548,43 @@ describe("HtmlArtifact", () => {
         )
       );
 
+      // Own attachments are opened only when uploaded here or in saved data.
+      const own = `${window.location.origin}/api/attachments.redirect?id=7`;
+      const fetchSpy = vi
+        .spyOn(window, "fetch")
+        .mockResolvedValue(new Response(new Blob(["img"])));
+      frame.handleMessage({
+        type: MessageType.Rpc,
+        id: 5,
+        method: "file",
+        args: [own],
+      });
+      await vi.waitFor(() =>
+        expect(post).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            id: 5,
+            ok: false,
+            error: expect.stringMatching(/only open files/),
+          }),
+          "*"
+        )
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+      frame.setData(JSON.stringify({ files: [{ url: own }] }, null, 2));
+      frame.handleMessage({
+        type: MessageType.Rpc,
+        id: 6,
+        method: "file",
+        args: [own],
+      });
+      await vi.waitFor(() =>
+        expect(post).toHaveBeenLastCalledWith(
+          expect.objectContaining({ id: 6, ok: true }),
+          "*"
+        )
+      );
+      fetchSpy.mockRestore();
+
       // Data changed elsewhere reaches the running artifact without a reload.
       const src = frame.iframe.src;
       frame.setData('{"n":3}');
