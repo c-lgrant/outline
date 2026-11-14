@@ -1,18 +1,21 @@
 <!doctype html>
 <!--
-  Renderer for "html-live" code blocks.
+  Renderer for "html-live" and "html-page" code blocks.
 
   Host this file on an origin that is NOT the Outline origin, then set
   HTML_ARTIFACT_RENDERER_URL to its URL. Outline loads it in an iframe that is
-  sandboxed without allow-same-origin, posts the block's HTML to it, and sizes
-  the frame from the height messages it sends back.
+  sandboxed without allow-same-origin and posts the block's HTML to it. The
+  renderer shows the HTML in a nested srcdoc iframe (same sandbox), relays
+  height reports and storage calls between that page and Outline, and adds
+  window.outline (load, save, onChange, upload, fileUrl) to the page.
 
   Safety rules this page enforces:
   - It renders nothing unless its origin is opaque ("null"), which only happens
     inside a frame sandboxed without allow-same-origin. Opened directly, or
     framed without the sandbox, it refuses. Rendered HTML therefore can never
     read cookies or storage for the host it is served from.
-  - It only accepts HTML from its parent window.
+  - It only accepts HTML and storage answers from its parent window, and only
+    relays storage calls from the page it rendered.
   - Optionally, set data-allowed-origins on the script tag below to a space
     separated list of Outline origins that may send HTML.
 -->
@@ -22,6 +25,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
     <title>Artifact renderer</title>
+    <style>
+      :root { color-scheme: light dark; }
+      html, body { margin: 0; padding: 0; }
+      iframe { display: block; width: 100%; border: 0; min-height: 100vh; height: 150px; }
+    </style>
   </head>
   <body>
     <script data-allowed-origins="">
@@ -37,9 +45,12 @@
         var allowed = (script.getAttribute("data-allowed-origins") || "")
           .split(/\s+/)
           .filter(Boolean);
+        var SANDBOX = "allow-scripts allow-forms allow-popups";
+        var inner = null;
 
-        // Lets the page follow the theme Outline sets on the frame. Zero
-        // specificity, so a page that sets its own color-scheme wins.
+        // Added to every page: follow the theme Outline sets on the frame
+        // (zero specificity, so a page's own color-scheme wins), and report
+        // the page height so the frame can fit it.
         var reporter =
           "<style>:where(:root) { color-scheme: light dark; }</style>" +
           "<script>(function () {" +
@@ -54,24 +65,110 @@
           "addEventListener('load', send); setTimeout(send, 0);" +
           "})();<\/script>";
 
+        // Runs inside the page before its own scripts and defines
+        // window.outline. Every call is a message that the renderer relays
+        // to Outline, which does the work outside the sandbox.
+        function storageShim(initial, canEdit) {
+          var data = initial === undefined ? null : initial;
+          var seq = 0;
+          var pending = {};
+          var listeners = [];
+          function clone(v) { return v == null ? null : JSON.parse(JSON.stringify(v)); }
+          function call(method, arg) {
+            return new Promise(function (resolve, reject) {
+              var id = ++seq;
+              pending[id] = { resolve: resolve, reject: reject };
+              parent.postMessage({ type: "outline-artifact:rpc", id: id, method: method, args: [arg] }, "*");
+            });
+          }
+          addEventListener("message", function (event) {
+            if (event.source !== parent) { return; }
+            var m = event.data || {};
+            if (m.type === "outline-artifact:rpc-result" && pending[m.id]) {
+              var p = pending[m.id];
+              delete pending[m.id];
+              if (m.ok) { p.resolve(m.result); } else { p.reject(new Error(m.error)); }
+            } else if (m.type === "outline-artifact:data") {
+              if (JSON.stringify(m.data) === JSON.stringify(data)) { return; }
+              data = m.data;
+              listeners.forEach(function (fn) { try { fn(clone(data)); } catch (e) { console.error(e); } });
+            }
+          });
+          window.outline = {
+            canEdit: !!canEdit,
+            load: function () { return Promise.resolve(clone(data)); },
+            save: function (value) {
+              var copy = clone(value);
+              return call("save", copy).then(function () { data = copy; });
+            },
+            onChange: function (fn) {
+              listeners.push(fn);
+              return function () { listeners = listeners.filter(function (f) { return f !== fn; }); };
+            },
+            upload: function (file) { return call("upload", file); },
+            fileUrl: function (url) {
+              return call("file", url).then(function (blob) { return URL.createObjectURL(blob); });
+            }
+          };
+        }
+
+        function withShim(html, message) {
+          var args = [message.data === undefined ? null : message.data, !!message.canEdit]
+            .map(function (v) { return JSON.stringify(v).replace(/</g, "\\u003c"); })
+            .join(",");
+          var shim = "<script>(" + storageShim.toString() + ")(" + args + ");<\/script>";
+
+          // Keep the doctype first so the page stays in standards mode.
+          var doctype = html.match(/^\s*<!doctype[^>]*>/i);
+          return doctype
+            ? doctype[0] + shim + html.slice(doctype[0].length)
+            : shim + html;
+        }
+
+        function mount(message) {
+          if (inner) {
+            inner.remove();
+          }
+          inner = document.createElement("iframe");
+          inner.setAttribute("sandbox", SANDBOX);
+          inner.setAttribute("title", "Live HTML");
+          inner.srcdoc = withShim(message.html, message) + reporter;
+          document.body.appendChild(inner);
+        }
+
         window.addEventListener("message", function (event) {
-          if (event.source !== window.parent) {
+          var m = event.data || {};
+
+          // From Outline: render a page, or pass answers and data updates on.
+          if (event.source === window.parent) {
+            if (allowed.length && allowed.indexOf(event.origin) === -1) {
+              return;
+            }
+            if (m.type === "outline-artifact:render" && typeof m.html === "string") {
+              mount(m);
+            } else if (
+              inner &&
+              inner.contentWindow &&
+              (m.type === "outline-artifact:rpc-result" || m.type === "outline-artifact:data")
+            ) {
+              inner.contentWindow.postMessage(m, "*");
+            }
             return;
           }
-          if (allowed.length && allowed.indexOf(event.origin) === -1) {
-            return;
+
+          // From the page: size the nested frame and tell Outline, or relay a
+          // storage call.
+          if (inner && event.source === inner.contentWindow) {
+            if (m.type === "outline-artifact:height" && typeof m.height === "number") {
+              inner.style.height = Math.max(0, Math.ceil(m.height)) + "px";
+              window.parent.postMessage({ type: "outline-artifact:height", height: m.height }, "*");
+            } else if (m.type === "outline-artifact:rpc") {
+              window.parent.postMessage(
+                { type: "outline-artifact:rpc", id: m.id, method: m.method, args: m.args },
+                "*"
+              );
+            }
           }
-          var data = event.data;
-          if (
-            !data ||
-            data.type !== "outline-artifact:render" ||
-            typeof data.html !== "string"
-          ) {
-            return;
-          }
-          document.open();
-          document.write(data.html + reporter);
-          document.close();
         });
 
         window.parent.postMessage({ type: "outline-artifact:ready" }, "*");
