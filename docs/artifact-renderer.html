@@ -1,0 +1,78 @@
+<!doctype html>
+<!--
+  Renderer for "html-live" code blocks.
+
+  Host this file on an origin that is NOT the Outline origin, then set
+  HTML_ARTIFACT_RENDERER_URL to its URL. Outline loads it in an iframe that is
+  sandboxed without allow-same-origin, posts the block's HTML to it, and sizes
+  the frame from the height messages it sends back.
+
+  Safety rules this page enforces:
+  - It renders nothing unless its origin is opaque ("null"), which only happens
+    inside a frame sandboxed without allow-same-origin. Opened directly, or
+    framed without the sandbox, it refuses. Rendered HTML therefore can never
+    read cookies or storage for the host it is served from.
+  - It only accepts HTML from its parent window.
+  - Optionally, set data-allowed-origins on the script tag below to a space
+    separated list of Outline origins that may send HTML.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Artifact renderer</title>
+  </head>
+  <body>
+    <script data-allowed-origins="">
+      (function () {
+        var script = document.currentScript;
+
+        if (window.origin !== "null" || window.parent === window) {
+          document.body.textContent =
+            "This page only renders inside a sandboxed Outline frame.";
+          return;
+        }
+
+        var allowed = (script.getAttribute("data-allowed-origins") || "")
+          .split(/\s+/)
+          .filter(Boolean);
+
+        var reporter =
+          "<script>(function () {" +
+          "var last = 0;" +
+          "function send() {" +
+          "  var b = document.body; if (!b) { return; }" +
+          "  var cs = getComputedStyle(b);" +
+          "  var h = Math.ceil(b.getBoundingClientRect().height + parseFloat(cs.marginTop) + parseFloat(cs.marginBottom));" +
+          "  if (h !== last) { last = h; parent.postMessage({ type: 'outline-artifact:height', height: h }, '*'); }" +
+          "}" +
+          "if (window.ResizeObserver && document.body) { new ResizeObserver(send).observe(document.body); }" +
+          "addEventListener('load', send); setTimeout(send, 0);" +
+          "})();<\/script>";
+
+        window.addEventListener("message", function (event) {
+          if (event.source !== window.parent) {
+            return;
+          }
+          if (allowed.length && allowed.indexOf(event.origin) === -1) {
+            return;
+          }
+          var data = event.data;
+          if (
+            !data ||
+            data.type !== "outline-artifact:render" ||
+            typeof data.html !== "string"
+          ) {
+            return;
+          }
+          document.open();
+          document.write(data.html + reporter);
+          document.close();
+        });
+
+        window.parent.postMessage({ type: "outline-artifact:ready" }, "*");
+      })();
+    </script>
+  </body>
+</html>
