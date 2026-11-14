@@ -51,6 +51,19 @@ export function isHtmlData(node: Node) {
   return isCode(node) && node.attrs.language === HTML_DATA_LANGUAGE;
 }
 
+/** The code block language that lists files an artifact uploaded. */
+export const HTML_FILES_LANGUAGE = "html-files";
+
+/**
+ * Returns true if the node is a code block listing an artifact's uploads.
+ *
+ * @param node The node to check.
+ * @returns true if the node is an html-files code block.
+ */
+export function isHtmlFiles(node: Node) {
+  return isCode(node) && node.attrs.language === HTML_FILES_LANGUAGE;
+}
+
 /**
  * Returns true if the node is a live HTML code block shown as a full page.
  *

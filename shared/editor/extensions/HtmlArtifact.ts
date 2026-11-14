@@ -7,8 +7,10 @@ import { Decoration, DecorationSet } from "prosemirror-view";
 import env from "../../env";
 import {
   HTML_DATA_LANGUAGE,
+  HTML_FILES_LANGUAGE,
   isHtmlArtifact,
   isHtmlData,
+  isHtmlFiles,
   isHtmlPage,
 } from "../lib/isCode";
 import { findBlockNodes } from "../queries/findChildren";
@@ -46,7 +48,22 @@ export type StorageHost = {
   save: (frame: ArtifactFrame, data: unknown) => Promise<void>;
   /** Uploads a file as an Outline attachment and returns its absolute URL. */
   upload: (file: File) => Promise<string>;
+  /** Records an uploaded file in the artifact's html-files block. */
+  recordFile: (frame: ArtifactFrame, url: string) => Promise<void>;
 };
+
+/**
+ * Parses the text of an html-files block: a JSON array of attachment URLs.
+ *
+ * @param text the block's text.
+ * @returns the URLs, or an empty list when the block is empty or invalid.
+ */
+export function parseFiles(text: string | undefined): string[] {
+  const value = parseData(text);
+  return Array.isArray(value)
+    ? value.filter((url): url is string => typeof url === "string")
+    : [];
+}
 
 /**
  * Parses the text of an html-data block.
@@ -293,6 +310,12 @@ export class ArtifactFrame {
   /** Attachment URLs this frame uploaded since the doc was opened. */
   private readonly uploaded = new Set<string>();
 
+  /** Uploads started since the doc was opened, including failed ones. */
+  private uploadCount = 0;
+
+  /** Attachment URLs recorded in the html-files block, which only Outline writes. */
+  recordedFiles: string[] = [];
+
   /** Stable key for the widget decoration that shows this frame. */
   readonly id = `html-artifact-${++nextId}`;
 
@@ -533,29 +556,31 @@ export class ArtifactFrame {
         if (arg.size > MAX_UPLOAD_BYTES) {
           throw new Error("Files must be 25 MB or smaller");
         }
-        if (this.uploaded.size >= MAX_UPLOADS_PER_LOAD) {
+        // Reserve the slot before awaiting, so parallel calls cannot pass
+        // the cap together.
+        if (this.uploadCount >= MAX_UPLOADS_PER_LOAD) {
           throw new Error(
             `A page can upload at most ${MAX_UPLOADS_PER_LOAD} files each time the doc is opened`
           );
         }
+        this.uploadCount++;
         const url = await this.host.upload(arg);
         this.uploaded.add(url);
+        await this.host.recordFile(this, url);
         reply(true, { url, name: arg.name, size: arg.size, type: arg.type });
         return;
       }
 
       if (method === "file") {
-        // A page may only open its own files: ones it uploaded in this
-        // session or ones listed in its saved data. It cannot use the
-        // viewer's login to read any other attachment.
+        // A page may only open files it uploaded: in this session, or
+        // earlier, as recorded in its html-files block. Only Outline writes
+        // that block (save() cannot), so a page cannot use the viewer's
+        // login to read any other attachment.
         if (
           !isOwnFileUrl(arg) ||
-          (!this.uploaded.has(arg) &&
-            !this.dataText.includes(JSON.stringify(arg)))
+          (!this.uploaded.has(arg) && !this.recordedFiles.includes(arg))
         ) {
-          throw new Error(
-            "A page can only open files it uploaded or lists in its saved data"
-          );
+          throw new Error("A page can only open files it uploaded");
         }
         const response = await fetch(new URL(arg, window.location.origin), {
           credentials: "same-origin",
@@ -746,31 +771,94 @@ export function saveArtifactData(view: EditorView, pos: number, data: unknown) {
     throw new Error("Saved data must be 256 KB or smaller");
   }
 
-  const { state } = view;
-  const inside = pos >= 0 && pos < state.doc.content.size;
-  const node = inside ? state.doc.nodeAt(pos) : null;
+  writeCompanion(view, pos, "data", json);
+}
+
+/**
+ * Adds an uploaded file's URL to the html-files block of the artifact at pos.
+ * Only trusted editor code calls this, never the page, which is what lets
+ * fileUrl() trust the list.
+ *
+ * @param view the editor view.
+ * @param pos the position of the artifact's code block.
+ * @param url the attachment URL.
+ */
+export function recordArtifactFile(view: EditorView, pos: number, url: string) {
+  const node = artifactAt(view.state.doc, pos);
+  const files = parseFiles(
+    companions(view.state.doc, pos, node).files?.node.textContent
+  );
+  if (files.includes(url)) {
+    return;
+  }
+  writeCompanion(view, pos, "files", JSON.stringify([...files, url], null, 2));
+}
+
+/**
+ * Returns the artifact block at pos, or throws when it is gone.
+ */
+function artifactAt(doc: Node, pos: number): Node {
+  const inside = pos >= 0 && pos < doc.content.size;
+  const node = inside ? doc.nodeAt(pos) : null;
   if (!node || !isHtmlArtifact(node)) {
     throw new Error("The page was moved or removed, so it cannot save");
   }
-  const after = pos + node.nodeSize;
-  const next = state.doc.nodeAt(after);
-  const content = state.schema.text(json);
+  return node;
+}
+
+/**
+ * Finds the blocks that belong to the artifact at pos: an html-data block
+ * right after it, then an html-files block.
+ */
+export function companions(
+  doc: Node,
+  pos: number,
+  node: Node
+): { data?: NodeWithPos; files?: NodeWithPos } {
+  const result: { data?: NodeWithPos; files?: NodeWithPos } = {};
+  let at = pos + node.nodeSize;
+  let next = at < doc.content.size ? doc.nodeAt(at) : null;
+  if (next && isHtmlData(next)) {
+    result.data = { node: next, pos: at };
+    at += next.nodeSize;
+    next = at < doc.content.size ? doc.nodeAt(at) : null;
+  }
+  if (next && isHtmlFiles(next)) {
+    result.files = { node: next, pos: at };
+  }
+  return result;
+}
+
+function writeCompanion(
+  view: EditorView,
+  pos: number,
+  kind: "data" | "files",
+  text: string
+) {
+  const { state } = view;
+  const node = artifactAt(state.doc, pos);
+  const found = companions(state.doc, pos, node);
+  const existing = found[kind];
+  const content = state.schema.text(text);
   const tr = state.tr;
 
-  if (next && isHtmlData(next)) {
-    if (next.textContent === json) {
+  if (existing) {
+    if (existing.node.textContent === text) {
       return;
     }
     tr.replaceWith(
-      after + 1,
-      after + next.nodeSize - 1,
+      existing.pos + 1,
+      existing.pos + existing.node.nodeSize - 1,
       Fragment.from(content)
     );
   } else {
-    tr.insert(
-      after,
-      node.type.create({ ...node.attrs, language: HTML_DATA_LANGUAGE }, content)
-    );
+    // Data goes right after the page; files go after the data, if any.
+    const insertAt =
+      kind === "files" && found.data
+        ? found.data.pos + found.data.node.nodeSize
+        : pos + node.nodeSize;
+    const language = kind === "data" ? HTML_DATA_LANGUAGE : HTML_FILES_LANGUAGE;
+    tr.insert(insertAt, node.type.create({ ...node.attrs, language }, content));
   }
   view.dispatch(tr);
 }
@@ -804,14 +892,16 @@ function getNewState(
     const page = isHtmlPage(block.node);
     frame.update(block.node.textContent, { ...options, page });
 
-    // The saved data, if any, is the html-data block right after the page.
-    const next = doc.nodeAt(end);
-    if (next && isHtmlData(next)) {
-      dataBlocks.push({ node: next, pos: end });
-      frame.setData(next.textContent);
-    } else {
-      frame.setData("");
+    // Saved data and the uploaded-files list sit right after the page.
+    const found = companions(doc, block.pos, block.node);
+    if (found.data) {
+      dataBlocks.push(found.data);
     }
+    if (found.files) {
+      dataBlocks.push(found.files);
+    }
+    frame.setData(found.data?.node.textContent ?? "");
+    frame.recordedFiles = parseFiles(found.files?.node.textContent);
 
     // Only the doc's first full page opens full screen, and only on load.
     if (autoOpen && page && !opened) {
@@ -889,6 +979,12 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
       }
       const url = await upload(file);
       return new URL(url, window.location.origin).toString();
+    },
+    recordFile: async (frame, url) => {
+      if (!frame.view) {
+        throw new Error("The page is not ready yet, try again");
+      }
+      recordArtifactFile(frame.view, frame.pos, url);
     },
   };
 
