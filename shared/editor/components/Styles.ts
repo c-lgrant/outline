@@ -2202,17 +2202,13 @@ mark {
     }
   }
 
-  &:fullscreen {
-    display: flex;
-    flex-direction: column;
-    background: ${props.theme.background};
-
-    iframe {
-      flex: 1;
-      height: auto !important;
-      min-height: 0;
+  // Touch screens have no hover, so keep the page toolbar visible there.
+  @media (hover: none) {
+    &.is-page .html-artifact-caption {
+      opacity: 0.92;
     }
   }
+
 }
 
 .ProseMirror.exported {
