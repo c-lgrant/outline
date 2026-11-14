@@ -30,6 +30,7 @@ import type { DefaultTheme } from "styled-components";
 import styled, { css } from "styled-components";
 import type { CommentAnchor } from "@shared/editor/commands/comment";
 import insertFiles from "@shared/editor/commands/insertFiles";
+import { ARTIFACT_DATA_META } from "@shared/editor/extensions/HtmlArtifact";
 import { unfoldToggleBlocksAt } from "@shared/editor/commands/toggleBlock";
 import { draftCommentAnchorPluginKey } from "@shared/editor/plugins/DraftCommentAnchorPlugin";
 import Styles from "@shared/editor/components/Styles";
@@ -626,6 +627,8 @@ export class Editor extends React.PureComponent<
           transactions.some((tr) => tr.docChanged) &&
           (!self.props.readOnly ||
             (self.props.canUpdate && transactions.some(isEditingCheckbox)) ||
+            (self.props.canUpdate &&
+              transactions.some((tr) => tr.getMeta(ARTIFACT_DATA_META))) ||
             (self.props.canComment && transactions.some(isEditingComment)))
         ) {
           self.handleChange({
