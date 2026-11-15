@@ -320,7 +320,7 @@ describe("HtmlArtifact", () => {
 
       // Height reports are kept for later instead of shrinking the overlay.
       frame.handleMessage({ type: MessageType.Height, height: 500 });
-      expect(frame.iframe.style.height).toBe("100%");
+      expect(frame.iframe.style.height).toBe("auto");
 
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
       expect(frame.isFullscreen).toBe(false);
@@ -434,6 +434,49 @@ describe("HtmlArtifact", () => {
         editable: () => editable,
       });
     }
+
+    it("closing the cached copy's editor keeps the live editor full screen", () => {
+      const open = () => {
+        const mount = document.createElement("div");
+        document.body.append(mount);
+        return new EditorView(mount, {
+          state: EditorState.create({
+            doc: docWith(["html-page", "<b>list</b>"]),
+            plugins: [
+              HtmlArtifact({
+                editor: {
+                  props: {
+                    readOnly: false,
+                    userPreferences: { openPagesFullscreen: true },
+                  },
+                } as never,
+              }),
+            ],
+          }),
+        });
+      };
+      const frameOf = (v: EditorView) =>
+        pluginKey.getState(v.state)!.decorationSet.find()[0].spec
+          .frame as ArtifactFrame;
+
+      const cached = open();
+      const live = open();
+      expect(frameOf(live).isFullscreen).toBe(true);
+      const cachedFrame = frameOf(cached);
+      cached.destroy();
+      expect(cachedFrame.isFullscreen).toBe(false);
+      expect(frameOf(live).isFullscreen).toBe(true);
+
+      // The bar sits above the page instead of on top of it.
+      const overlay = frameOf(live).iframe.parentElement!;
+      expect(overlay.firstElementChild?.className).toBe(
+        "html-artifact-caption"
+      );
+      live.destroy();
+      expect(document.querySelector(".html-artifact-overlay")).toBeNull();
+      document.body.style.overflow = "";
+      document.documentElement.style.overflow = "";
+    });
 
     it("only fetches files that live in this Outline", () => {
       expect(isOwnFileUrl("/api/attachments.redirect?id=1")).toBe(true);
