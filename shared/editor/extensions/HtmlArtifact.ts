@@ -367,7 +367,7 @@ export class ArtifactFrame {
     this.autoButton = document.createElement("button");
     this.autoButton.type = "button";
     this.autoButton.className = "html-artifact-auto";
-    this.autoButton.textContent = t("Full-screen setting");
+    this.autoButton.textContent = t("Settings");
     this.autoButton.addEventListener("click", () => {
       this.setFullscreen(false);
       window.location.assign(PREFERENCES_PATH);
@@ -376,7 +376,7 @@ export class ArtifactFrame {
     this.linkButton = document.createElement("button");
     this.linkButton.type = "button";
     this.linkButton.className = "html-artifact-link";
-    this.linkButton.textContent = t("Copy full-screen link");
+    this.linkButton.textContent = t("Copy link");
     this.linkButton.addEventListener("click", () => {
       void this.copyLink();
     });
@@ -644,34 +644,75 @@ export class ArtifactFrame {
             ? background
             : "Canvas",
       });
+      // A slim bar above the page, like the header of a Claude artifact. It
+      // takes its own space, so it never covers the page's content.
+      const color = getComputedStyle(this.element).color || "CanvasText";
       Object.assign(this.caption.style, {
-        position: "fixed",
-        top: "calc(8px + env(safe-area-inset-top, 0px))",
-        right: "calc(8px + env(safe-area-inset-right, 0px))",
-        zIndex: "3001",
+        position: "static",
+        flex: "none",
         display: "flex",
-        flexWrap: "wrap",
-        justifyContent: "flex-end",
+        alignItems: "center",
         gap: "6px",
-        maxWidth: "calc(100vw - 16px)",
-        padding: "4px",
-        borderRadius: "8px",
+        minHeight: "40px",
+        padding: "4px 8px",
+        paddingTop: "calc(4px + env(safe-area-inset-top, 0px))",
+        paddingLeft: "calc(8px + env(safe-area-inset-left, 0px))",
+        paddingRight: "calc(8px + env(safe-area-inset-right, 0px))",
+        borderBottom: "1px solid rgba(128, 128, 128, 0.25)",
         background: overlay.style.background,
-        boxShadow: "0 2px 12px rgba(0, 0, 0, 0.2)",
-        font: "13px system-ui, sans-serif",
+        color,
+        font: "13px system-ui, -apple-system, sans-serif",
         opacity: "1",
       });
-      this.title.hidden = true;
+      Object.assign(this.title.style, {
+        flex: "1",
+        minWidth: "0",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        fontWeight: "600",
+      });
+      for (const button of [
+        this.autoButton,
+        this.linkButton,
+        this.fullscreenButton,
+      ]) {
+        Object.assign(button.style, {
+          font: "inherit",
+          color: "inherit",
+          background: "transparent",
+          border: "1px solid rgba(128, 128, 128, 0.35)",
+          borderRadius: "6px",
+          padding: "4px 10px",
+          minHeight: "32px",
+          cursor: "pointer",
+          whiteSpace: "nowrap",
+        });
+      }
+      this.title.hidden = false;
       this.warning.hidden = true;
       this.savedHeight = this.iframe.style.height;
-      Object.assign(this.iframe.style, { flex: "1", height: "100%" });
-      overlay.append(this.iframe, this.caption);
+      Object.assign(this.iframe.style, {
+        flex: "1",
+        height: "auto",
+        minHeight: "0",
+      });
+      overlay.append(this.caption, this.iframe);
       document.body.append(overlay);
       this.overlay = overlay;
     } else {
       this.caption.removeAttribute("style");
+      this.title.removeAttribute("style");
+      for (const button of [
+        this.autoButton,
+        this.linkButton,
+        this.fullscreenButton,
+      ]) {
+        button.removeAttribute("style");
+      }
       this.title.hidden = false;
       this.iframe.style.flex = "";
+      this.iframe.style.minHeight = "";
       this.iframe.style.height = this.savedHeight ?? "150px";
       this.element.append(this.caption, this.iframe);
       this.overlay?.remove();
@@ -697,9 +738,7 @@ export class ArtifactFrame {
 
   private syncButtons() {
     const on = this.isFullscreen;
-    this.fullscreenButton.textContent = on
-      ? t("Exit full screen")
-      : t("Full screen");
+    this.fullscreenButton.textContent = on ? t("Close") : t("Full screen");
     this.autoButton.hidden = !on || !this.page;
     this.linkButton.hidden = !on || !this.page;
   }
@@ -718,7 +757,7 @@ export class ArtifactFrame {
       this.linkButton.textContent = link;
     }
     setTimeout(() => {
-      this.linkButton.textContent = t("Copy full-screen link");
+      this.linkButton.textContent = t("Copy link");
     }, 2000);
   }
 
@@ -1040,11 +1079,16 @@ export default function HtmlArtifact({ editor }: { editor: Editor }) {
         );
       },
     },
-    view: () => ({
+    view: (editorView) => ({
       destroy() {
-        // Leaving the doc must not leave a full-screen overlay behind.
-        for (const frame of frames) {
-          if (frame.isFullscreen) {
+        // Leaving the doc must not leave a full-screen overlay behind. Only
+        // this editor's own frames are closed: Outline briefly shows a cached
+        // copy of the doc in a second editor, and removing that one must not
+        // close the page the live editor just opened.
+        const state = pluginKey.getState(editorView.state);
+        for (const decoration of state?.decorationSet.find() ?? []) {
+          const frame = decoration.spec.frame as ArtifactFrame | undefined;
+          if (frame?.isFullscreen) {
             frame.setFullscreen(false);
           }
         }
