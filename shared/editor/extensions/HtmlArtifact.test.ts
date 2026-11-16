@@ -160,6 +160,9 @@ describe("HtmlArtifact", () => {
       const frame = widgets[0].spec.frame as ArtifactFrame;
       expect(frame.iframe.getAttribute("sandbox")).toBe(SANDBOX);
       expect(SANDBOX).not.toContain("allow-same-origin");
+      // A link (target=_blank) must open a normal tab: a popup that keeps the sandbox has no
+      // scripts or origin, so Outline (and most sites) render a blank page (owner, 2026-11-16).
+      expect(SANDBOX.split(" ")).toContain("allow-popups-to-escape-sandbox");
       expect(widgets[0].from).toBe(state.doc.child(0).nodeSize);
     });
 

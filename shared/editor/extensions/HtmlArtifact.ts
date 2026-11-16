@@ -110,7 +110,10 @@ export function isOwnFileUrl(url: unknown): url is string {
 }
 
 /** Sandbox flags for the renderer frame. Never includes allow-same-origin. */
-export const SANDBOX = "allow-scripts allow-forms allow-popups";
+// allow-popups-to-escape-sandbox: links (target=_blank) open a normal tab. Without it the new
+// tab keeps this sandbox (no scripts, opaque origin) and most pages, Outline included, go blank.
+export const SANDBOX =
+  "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox";
 
 /** Smallest and largest height, in pixels, a frame may report. */
 const MIN_HEIGHT = 40;

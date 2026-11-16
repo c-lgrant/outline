@@ -45,7 +45,8 @@
         var allowed = (script.getAttribute("data-allowed-origins") || "")
           .split(/\s+/)
           .filter(Boolean);
-        var SANDBOX = "allow-scripts allow-forms allow-popups";
+        // Same flags as HtmlArtifact.ts SANDBOX: links open a normal (unsandboxed) tab.
+        var SANDBOX = "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox";
         var inner = null;
 
         // Added to every page: follow the theme Outline sets on the frame
